@@ -1,13 +1,13 @@
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { getAddress, verifyMessage } from 'quais';
 import { z } from 'zod';
 import type { Store } from '../store/index.js';
-import type { QuaiClient } from '../chain/client.js';
+import type { ChainClient } from '../chain/types.js';
 import type { QiService } from '../chain/qi.js';
 import type { Config } from '../config.js';
 import type { Merchant, Session, PaymentLink, WebhookDelivery, QiOrder } from '../types.js';
 import { newMerchantId, newWebhookSecret, newSlug } from '../util/ids.js';
+import { normalizeAddress, recoverMessageSigner } from '../util/address.js';
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from '../webhooks/urlGuard.js';
 import { rateLimit } from './rateLimit.js';
 import { cors } from './cors.js';
@@ -70,7 +70,7 @@ function parseAcceptedTokens(value: unknown): Set<string> {
  * Admin routes require `Authorization: Bearer <ADMIN_API_KEY>`. Self-service routes require a
  * session token issued by POST /v1/auth/login.
  */
-export function createServer(store: Store, client: QuaiClient, cfg: Config, qiService?: QiService): Express {
+export function createServer(store: Store, client: ChainClient, cfg: Config, qiService?: QiService): Express {
   const app = express();
   app.disable('x-powered-by');
   // `req.ip` (rate-limiter keys, login logging) is only the real client address when the hop
@@ -92,6 +92,7 @@ export function createServer(store: Store, client: QuaiClient, cfg: Config, qiSe
     const scope = cursorScope(cfg.CHAIN_ID, cfg.PAYWITHQUAI_ADDRESS);
     res.json({
       status: 'ok',
+      chainKind: cfg.CHAIN_KIND,
       contract: client.address,
       chainId: cfg.CHAIN_ID,
       cursor: (await store.getCursor(scope)) ?? null,
@@ -111,7 +112,7 @@ export function createServer(store: Store, client: QuaiClient, cfg: Config, qiSe
     const orderId = req.params.orderId ?? '';
     let merchant: string;
     try {
-      merchant = getAddress(merchantParam);
+      merchant = normalizeAddress(cfg, merchantParam);
     } catch {
       return res.status(400).json({ error: 'invalid merchant address' });
     }
@@ -124,7 +125,7 @@ export function createServer(store: Store, client: QuaiClient, cfg: Config, qiSe
     // `exists:true` struct (observed on Orchard), which would incorrectly yield amount 0.
     const isDevDemo =
       cfg.QI_DEV_SIMULATE && cfg.QI_DEV_DEMO_MERCHANT?.toLowerCase() === merchant.toLowerCase();
-    let order: Awaited<ReturnType<QuaiClient['getOrder']>>;
+    let order: Awaited<ReturnType<ChainClient['getOrder']>>;
     if (isDevDemo) {
       logger.warn({ merchant, orderId }, 'dev demo order synthesized (QI_DEV_SIMULATE)');
       order = {
@@ -180,7 +181,7 @@ export function createServer(store: Store, client: QuaiClient, cfg: Config, qiSe
   app.post('/v1/orders/:merchant/:orderId/meta', ordersLimiter, asyncHandler(async (req, res) => {
     let merchant: string;
     try {
-      merchant = getAddress(req.params.merchant ?? '');
+      merchant = normalizeAddress(cfg, req.params.merchant ?? '');
     } catch {
       return res.status(400).json({ error: 'invalid merchant address' });
     }
@@ -245,7 +246,7 @@ export function createServer(store: Store, client: QuaiClient, cfg: Config, qiSe
     }
     let address: string;
     try {
-      address = getAddress(parsed.data.address);
+      address = normalizeAddress(cfg, parsed.data.address);
     } catch {
       return res.status(400).json({ error: 'address fails checksum validation' });
     }
@@ -264,7 +265,7 @@ export function createServer(store: Store, client: QuaiClient, cfg: Config, qiSe
 
     let address: string;
     try {
-      address = getAddress(parsed.data.address);
+      address = normalizeAddress(cfg, parsed.data.address);
     } catch {
       return res.status(400).json({ error: 'address fails checksum validation' });
     }
@@ -294,10 +295,10 @@ export function createServer(store: Store, client: QuaiClient, cfg: Config, qiSe
     }
 
     // The signature proves ownership of the wallet: the recovered signer must equal the address
-    // the merchant claims. verifyMessage throws on malformed input -> 400, not a 500.
+    // the merchant claims. recoverMessageSigner throws on malformed input -> 400, not a 500.
     let recovered: string;
     try {
-      recovered = verifyMessage(message, signature);
+      recovered = recoverMessageSigner(cfg, message, signature);
     } catch {
       return res.status(401).json({ error: 'invalid credentials' });
     }
@@ -325,7 +326,7 @@ export function createServer(store: Store, client: QuaiClient, cfg: Config, qiSe
       sessionCookie('qmsession', token, SESSION_TTL_MS, COOKIE_SECURE, COOKIE_SAME_SITE),
     );
     logger.info({ merchantId: merchant.merchantId, address }, 'merchant logged in');
-    res.json({ token, expiresAt: now + SESSION_TTL_MS, merchant: publicMerchant(merchant) });
+    res.json({ token, expiresAt: now + SESSION_TTL_MS, merchant: publicMerchant(merchant, cfg) });
   }));
 
   // Session-protected self-service routes. requireSession is applied per-route (NOT as a blanket
@@ -344,7 +345,7 @@ export function createServer(store: Store, client: QuaiClient, cfg: Config, qiSe
     const session = res.locals.session as Session;
     const merchant = await store.getMerchantById(session.merchantId);
     if (!merchant) return res.status(404).json({ error: 'merchant not found' });
-    res.json(publicMerchant(merchant));
+    res.json(publicMerchant(merchant, cfg));
   }));
 
   app.patch('/v1/me', auth, asyncHandler(async (req, res) => {
@@ -379,7 +380,7 @@ await store.upsertMerchant(updated);
       if (requeued > 0) logger.info({ merchantId: updated.merchantId, requeued }, 'webhook configured — re-queued skipped payments');
     }
     logger.info({ merchantId: updated.merchantId }, 'merchant profile updated');
-    res.json(publicMerchant(updated));
+    res.json(publicMerchant(updated, cfg));
   }));
 
   // Attaches optional payer context (who paid / link vs checkout) to each delivery for the
@@ -471,14 +472,14 @@ await store.upsertMerchant(updated);
     };
     await store.upsertLink(link);
     logger.info({ slug, merchantId: merchant.merchantId, multiPay: d.multiPay, poolSize: d.orderPool.length }, 'payment link created');
-    res.status(201).json(publicLink(link));
+    res.status(201).json(publicLink(link, cfg));
   }));
 
   app.get('/v1/links', auth, asyncHandler(async (req, res) => {
     const session = res.locals.session as Session;
     const merchant = await store.getMerchantById(session.merchantId);
     if (!merchant) return res.status(404).json({ error: 'merchant not found' });
-    const links = (await store.listLinksForMerchant(merchant.address)).map(publicLink);
+    const links = (await store.listLinksForMerchant(merchant.address)).map((l) => publicLink(l, cfg));
     res.json({ links });
   }));
 
@@ -492,7 +493,7 @@ await store.upsertMerchant(updated);
     const slug = req.params.slug ?? '';
     const link = await store.getLink(slug);
     if (!link) return res.status(404).json({ error: 'link not found' });
-    res.json(publicLink(link));
+    res.json(publicLink(link, cfg));
   }));
 
   // Public merchant directory (landing-page showcase). Safe fields only — never expose
@@ -527,7 +528,7 @@ await store.upsertMerchant(updated);
     }
     let payerAddress: string;
     try {
-      payerAddress = getAddress(parsed.data.payerAddress);
+      payerAddress = normalizeAddress(cfg, parsed.data.payerAddress);
     } catch {
       return res.status(400).json({ error: 'payerAddress fails checksum validation' });
     }
@@ -555,7 +556,7 @@ await store.upsertMerchant(updated);
       logger.info({ slug, payerAddress, orderId: recycled }, 'stale claim recycled');
       return res.json({
         orderId: recycled,
-        merchant: getAddress(link.merchantAddress),
+        merchant: normalizeAddress(cfg, link.merchantAddress),
         token: link.tokenAddress,
         amount: link.amount,
         poolRemaining: link.orderPool.length,
@@ -569,7 +570,7 @@ await store.upsertMerchant(updated);
     logger.info({ slug, payerAddress, orderId }, 'order claimed from pool');
     res.json({
       orderId,
-      merchant: getAddress(link.merchantAddress),
+      merchant: normalizeAddress(cfg, link.merchantAddress),
       token: link.tokenAddress,
       amount: link.amount,
       poolRemaining: link.orderPool.length,
@@ -609,7 +610,7 @@ await store.upsertMerchant(updated);
     }
     res.json({
       orderId,
-      merchant: getAddress(link.merchantAddress),
+      merchant: normalizeAddress(cfg, link.merchantAddress),
       amount: link.amount,
       poolRemaining: link.orderPool.length,
       qi: qiView(rec),
@@ -644,7 +645,7 @@ await store.upsertMerchant(updated);
   }));
 
   admin.get('/merchants', asyncHandler(async (_req, res) => {
-    res.json({ merchants: (await store.listMerchants()).map(publicMerchant) });
+    res.json({ merchants: (await store.listMerchants()).map((m) => publicMerchant(m, cfg)) });
   }));
 
   const OnboardSchema = z.object({
@@ -672,7 +673,7 @@ await store.upsertMerchant(updated);
     }
     let address: string;
     try {
-      address = getAddress(parsed.data.address);
+      address = normalizeAddress(cfg, parsed.data.address);
     } catch {
       // Mixed-case input passes the regex but fails checksum validation — a client error, not
       // a server fault (must not bubble into the 500 handler).
@@ -699,7 +700,7 @@ await store.upsertMerchant(updated);
     const requeued = await store.requeueSkippedForMerchant(merchant);
     logger.info({ merchantId: merchant.merchantId, address, requeued }, 'merchant onboarded');
     // The secret is returned exactly once — the merchant must store it to verify signatures.
-    res.status(201).json({ ...publicMerchant(merchant), webhookSecret: merchant.webhookSecret });
+    res.status(201).json({ ...publicMerchant(merchant, cfg), webhookSecret: merchant.webhookSecret });
   }));
 
   const PatchMerchantSchema = z
@@ -715,7 +716,7 @@ await store.upsertMerchant(updated);
   admin.patch('/merchants/:address', asyncHandler(async (req, res) => {
     let address: string;
     try {
-      address = getAddress(req.params.address ?? '');
+      address = normalizeAddress(cfg, req.params.address ?? '');
     } catch {
       return res.status(400).json({ error: 'invalid merchant address' });
     }
@@ -752,7 +753,7 @@ await store.upsertMerchant(updated);
       if (requeued > 0) logger.info({ merchantId: updated.merchantId, requeued }, 'webhook configured — re-queued skipped payments');
     }
     logger.info({ merchantId: updated.merchantId, address, active: updated.active }, 'merchant updated');
-    res.json(publicMerchant(updated));
+    res.json(publicMerchant(updated, cfg));
   }));
 
   admin.get('/deliveries', asyncHandler(async (_req, res) => {
@@ -800,10 +801,10 @@ await store.upsertMerchant(updated);
 }
 
 /** Merchant view without the signing secret. */
-function publicMerchant(m: Merchant) {
+function publicMerchant(m: Merchant, cfg: Pick<Config, 'CHAIN_KIND'>) {
   return {
     merchantId: m.merchantId,
-    address: getAddress(m.address),
+    address: normalizeAddress(cfg, m.address),
     name: m.name,
     webhookUrl: m.webhookUrl,
     active: m.active,
@@ -812,10 +813,10 @@ function publicMerchant(m: Merchant) {
 }
 
 /** Link view — omits the internal orderPool array; pool size only. */
-function publicLink(l: PaymentLink) {
+function publicLink(l: PaymentLink, cfg: Pick<Config, 'CHAIN_KIND'>) {
   return {
     slug: l.slug,
-    merchantAddress: getAddress(l.merchantAddress),
+    merchantAddress: normalizeAddress(cfg, l.merchantAddress),
     merchantId: l.merchantId,
     merchantName: l.merchantName,
     shopName: l.shopName,

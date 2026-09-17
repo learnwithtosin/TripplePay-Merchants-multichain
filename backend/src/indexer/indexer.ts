@@ -1,4 +1,4 @@
-import type { QuaiClient } from '../chain/client.js';
+import type { ChainClient } from '../chain/types.js';
 import type { Store } from '../store/index.js';
 import type { Config } from '../config.js';
 import { paymentId, type PaymentEvent, type WebhookDelivery, type WebhookPayload } from '../types.js';
@@ -34,7 +34,7 @@ export class Indexer {
   private stopped = false;
 
   constructor(
-    private readonly client: QuaiClient,
+    private readonly client: ChainClient,
     private readonly store: Store,
     private readonly cfg: Config,
     private readonly now: () => number = () => Date.now(),

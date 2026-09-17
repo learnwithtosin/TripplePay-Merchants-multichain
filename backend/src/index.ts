@@ -5,7 +5,7 @@ import { logger, log } from './logger.js';
 import { JsonStore } from './store/json.js';
 import { PostgresStore } from './store/postgres.js';
 import type { Store } from './store/index.js';
-import { QuaiClient } from './chain/client.js';
+import { createChainClient } from './chain/index.js';
 import { QiService } from './chain/qi.js';
 import { Indexer } from './indexer/indexer.js';
 import { QiIndexer } from './indexer/qi-indexer.js';
@@ -18,6 +18,7 @@ async function main(): Promise<void> {
   const cfg = loadConfig();
   boot.info(
     {
+      chainKind: cfg.CHAIN_KIND,
       chainId: cfg.CHAIN_ID,
       contract: cfg.PAYWITHQUAI_ADDRESS,
       confirmations: cfg.CONFIRMATIONS,
@@ -40,13 +41,15 @@ async function main(): Promise<void> {
         return pg;
       })()
     : new JsonStore(cfg.DATABASE_PATH);
-  const client = new QuaiClient(cfg);
+  const client = createChainClient(cfg);
   const dispatcher = new WebhookDispatcher(store, cfg);
   const indexer = new Indexer(client, store, cfg);
-  // Qi settlement (UTXO-ledger checkout). Feature-gated by QI_MNEMONIC + QI_RPC_URL; when either
-  // is absent the service stays disabled and the API reports `qi: {enabled:false}`.
-  const qi = new QiService(cfg, store);
-  const qiIndexer = new QiIndexer(qi, store, cfg);
+  // Qi settlement (UTXO-ledger checkout) is Quai-only — skipped entirely on the evm path
+  // (config.ts already refuses to boot CHAIN_KIND=evm with any QI_* variable set). On the quai
+  // path this is unchanged: feature-gated by QI_MNEMONIC + QI_RPC_URL; when either is absent the
+  // service stays disabled and the API reports `qi: {enabled:false}`.
+  const qi = cfg.CHAIN_KIND === 'evm' ? undefined : new QiService(cfg, store);
+  const qiIndexer = qi ? new QiIndexer(qi, store, cfg) : undefined;
 
   const app = createServer(store, client, cfg, qi);
   const server: Server = app.listen(cfg.PORT, () => boot.info({ port: cfg.PORT }, 'HTTP API listening'));
@@ -54,10 +57,10 @@ async function main(): Promise<void> {
   if (store instanceof PostgresStore) await store.init();
   // Seed the Qi wallet with already-persisted receive addresses BEFORE any fresh derivation —
   // the in-memory BIP44 counter resets on restart and would otherwise re-derive old addresses.
-  await qi.init();
+  await qi?.init();
   dispatcher.start();
   await indexer.start();
-  await qiIndexer.start();
+  await qiIndexer?.start();
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
@@ -65,7 +68,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     boot.info({ signal }, 'shutting down');
     await indexer.stop();
-    await qiIndexer.stop();
+    await qiIndexer?.stop();
     await dispatcher.stop();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await store.close();
