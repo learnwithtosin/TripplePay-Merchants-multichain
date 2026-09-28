@@ -11,12 +11,22 @@ const boolish = (def: boolean) =>
     .transform((v) => (v === undefined ? def : v === 'true' || v === '1'));
 
 const EnvSchema = z.object({
-  // Selects which chain client this process uses (chain/index.ts#createChainClient). "quai"
-  // (default) is the existing quais-SDK path — Cyprus-1 zone rules, Qi support, unchanged by
-  // anything below. "evm" is the ethers v6 path for standard EVM chains (Robinhood Chain
-  // testnet, Base Sepolia, ...). One process serves exactly one chain — there is no per-request
-  // or per-merchant chain selection; running a second chain means running a second process with
-  // its own env and its own database.
+  // --- Multi-chain configuration (see src/chains.ts) ---------------------------------------
+  // CHAINS_JSON (inline JSON array) or CHAINS_CONFIG_PATH (path to a JSON file, default
+  // ./chains.json if present) describe every chain this process serves; see
+  // backend/chains.example.json and backend/README.md. When NEITHER is set and no ./chains.json
+  // file exists, chains.ts synthesizes a single chain from the legacy vars below (RPC_URL,
+  // CHAIN_ID, PAYWITHQUAI_ADDRESS, CHAIN_KIND, START_BLOCK, CONFIRMATIONS, POLL_INTERVAL_MS,
+  // MAX_BLOCK_RANGE, ACCEPTED_TOKENS) so an existing single-chain deployment is unaffected.
+  CHAINS_JSON: z.string().optional(),
+  CHAINS_CONFIG_PATH: z.string().optional(),
+
+  // Selects the chain client for the LEGACY single-chain fallback path above (chains.ts only
+  // reads this when neither CHAINS_JSON nor a chains.json file is present).
+  // DEPRECATED: prefer CHAINS_JSON/CHAINS_CONFIG_PATH, where each chain declares its own "kind".
+  // Kept working indefinitely for existing single-chain deployments — never removed silently.
+  // "quai" (default) is the quais-SDK path — Cyprus-1 zone rules, Qi support. "evm" is the
+  // ethers v6 path for standard EVM chains (Robinhood Chain testnet, Base Sepolia, ...).
   CHAIN_KIND: z.enum(['quai', 'evm']).default('quai'),
 
   RPC_URL: z.string().url(),
