@@ -11,7 +11,8 @@
     "deploy:robinhood-testnet": "hardhat run scripts/evm/deploy.js --network robinhoodTestnet",
     "deploy:base-sepolia": "hardhat run scripts/evm/deploy.js --network baseSepolia",
     "demo:robinhood-testnet": "hardhat run scripts/evm/payDemo.js --network robinhoodTestnet",
-    "demo:base-sepolia": "hardhat run scripts/evm/payDemo.js --network baseSepolia"
+    "demo:base-sepolia": "hardhat run scripts/evm/payDemo.js --network baseSepolia",
+    "paylink:robinhood-testnet": "hardhat run scripts/evm/payLink.js --network robinhoodTestnet"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
