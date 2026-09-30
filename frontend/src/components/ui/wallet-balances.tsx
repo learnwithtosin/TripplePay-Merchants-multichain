@@ -1,17 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { BrowserProvider, Contract, formatUnits as formatUnitsQuai, parseQuai } from "quais";
+import { BrowserProvider, Contract, parseQuai } from "quais";
 import {
   BrowserProvider as EvmBrowserProvider,
   JsonRpcProvider as EvmJsonRpcProvider,
   Contract as EvmContract,
-  formatUnits as formatUnitsEvm,
 } from "ethers";
 import { getActiveWallet } from "@/lib/wallets";
 import { getRpcProvider } from "@/lib/payment";
 import { listChains, type ChainInfo } from "@/lib/chains";
-import { useChainSelector } from "@/lib/relayer";
+import { useChainSelector, formatTokenAmount } from "@/lib/relayer";
 import { listCurrencies } from "@/lib/currencies";
 import { requestAppWalletFunding } from "@/lib/blip";
 import { RefreshCw, Wallet as WalletIcon, PlusCircle } from "lucide-react";
@@ -29,13 +28,6 @@ function getEvmRpcProvider(chain: ChainInfo): EvmJsonRpcProvider {
     evmProviders.set(chain.chainId, p);
   }
   return p;
-}
-
-/** Truncates a formatted unit string to 2 decimals WITHOUT float math. */
-function shortUnits(value: bigint, decimals: number, chain: ChainInfo): string {
-  const formatted = chain.kind === "quai" ? formatUnitsQuai(value, decimals) : formatUnitsEvm(value, decimals);
-  const [whole, frac = ""] = formatted.split(".");
-  return frac ? `${whole}.${frac.slice(0, 2)}` : whole;
 }
 
 /** Reads a native or ERC-20 balance against the RIGHT chain's own RPC/contract library — kept
@@ -130,7 +122,7 @@ export function WalletBalances() {
         [
           "native",
           readBalance(chain, address, null)
-            .then((b) => shortUnits(b, chain.nativeCurrency.decimals, chain))
+            .then((b) => formatTokenAmount(b, chain.nativeCurrency.decimals, chain.kind))
             .catch(() => null),
         ],
         ...listCurrencies(chain.chainId)
@@ -140,7 +132,7 @@ export function WalletBalances() {
               [
                 c.address.toLowerCase(),
                 readBalance(chain, address, c.address)
-                  .then((b) => shortUnits(b, c.decimals, chain))
+                  .then((b) => formatTokenAmount(b, c.decimals, chain.kind))
                   .catch(() => null),
               ] as [string, Promise<string | null>],
           ),

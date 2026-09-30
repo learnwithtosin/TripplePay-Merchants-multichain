@@ -7,7 +7,7 @@ import { formatUnits as formatUnitsQuai } from "quais";
 import { formatUnits as formatUnitsEvm } from "ethers";
 import { backendFetch } from "@/lib/payment";
 import { currencyDecimals, currencySymbol } from "@/lib/currencies";
-import { getChainById, getDefaultChain, type ChainInfo } from "@/lib/chains";
+import { getChainById, getDefaultChain, type ChainInfo, type ChainKind } from "@/lib/chains";
 import { getActiveWallet, getWalletChainId, subscribeToWalletChanges } from "@/lib/wallets";
 import { getSessionToken, isLoggedIn, logout } from "@/lib/auth";
 
@@ -234,19 +234,48 @@ export function useChainSelector(): [ChainInfo, (chain: ChainInfo) => void] {
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
+/**
+ * Converts a raw amount to a display string that is accurate AND readable at both ends of the
+ * scale — the single formatter every token/native amount on the dashboard goes through, so one
+ * card can never disagree with another. A fixed low decimal count (2, as wallet-balances.tsx used
+ * to truncate to) silently rounds a real small balance down to "0.00", which reads as "my money
+ * is gone" for something like 0.0098 ETH; showing the FULL raw precision everywhere instead makes
+ * ordinary larger amounts unreadable (many chains use 18 decimals). Split the difference:
+ *   - A genuinely zero amount (every fractional digit, if any, is 0) returns the bare "0" —
+ *     visibly distinct from any non-zero amount, which always shows at least one significant digit.
+ *   - An amount with a non-zero whole part is capped at 6 fractional places (trailing zeros
+ *     trimmed) — losing precision past that is an ordinary, standard readability tradeoff once the
+ *     whole part alone already establishes the amount isn't zero or dust.
+ *   - An amount under 1 shows enough digits PAST its first significant fractional digit that it
+ *     reads as what it actually is, however small — never collapsed to a misleadingly round
+ *     number the way a fixed decimal cap would.
+ */
+export function formatTokenAmount(value: bigint, decimals: number, kind: ChainKind): string {
+  const full = kind === "quai" ? formatUnitsQuai(value, decimals) : formatUnitsEvm(value, decimals);
+  const [whole, fracRaw = ""] = full.split(".");
+
+  if (whole !== "0") {
+    const frac = fracRaw.slice(0, 6).replace(/0+$/, "");
+    return frac ? `${whole}.${frac}` : whole;
+  }
+
+  const firstSignificant = fracRaw.search(/[1-9]/);
+  if (firstSignificant === -1) return "0";
+  const precision = Math.max(firstSignificant + 4, 6);
+  const frac = fracRaw.slice(0, precision).replace(/0+$/, "");
+  return `0.${frac}`;
+}
+
 /** Shared low-level formatter both formatDeliveryAmount and summarizeVolume build on — one place
  *  that knows "native uses the chain's own nativeCurrency; anything else goes through the
  *  chain-indexed currencies registry", so the two never drift apart. */
 function formatChainAmount(net: string | bigint, token: string, chain: ChainInfo): string {
   if (token.toLowerCase() === ZERO_ADDRESS) {
-    const formatted =
-      chain.kind === "quai"
-        ? formatUnitsQuai(net, chain.nativeCurrency.decimals)
-        : formatUnitsEvm(net, chain.nativeCurrency.decimals);
+    const formatted = formatTokenAmount(BigInt(net), chain.nativeCurrency.decimals, chain.kind);
     return `${formatted} ${chain.nativeCurrency.symbol}`;
   }
   const decimals = currencyDecimals(token, chain.chainId);
-  const formatted = chain.kind === "quai" ? formatUnitsQuai(net, decimals) : formatUnitsEvm(net, decimals);
+  const formatted = formatTokenAmount(BigInt(net), decimals, chain.kind);
   return `${formatted} ${currencySymbol(token, chain.chainId)}`;
 }
 

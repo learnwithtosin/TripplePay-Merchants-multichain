@@ -9,10 +9,8 @@ import {
   Wallet2,
   XCircle,
 } from "lucide-react";
-import { formatUnits as formatUnitsQuai } from "quais";
-import { formatUnits as formatUnitsEvm } from "ethers";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
-import { summarizeVolume, useRelayerData, useConnectedChain, type Delivery } from "@/lib/relayer";
+import { summarizeVolume, formatTokenAmount, useRelayerData, useConnectedChain, type Delivery } from "@/lib/relayer";
 
 interface DailyPoint {
   day: string;
@@ -209,9 +207,7 @@ export default function AnalyticsPage() {
                             and ERC-20 payments would add incompatible units together. Formatting
                             here uses the connected chain's native decimals, same as before this
                             fix — flagging the mixing itself as a separate, out-of-scope bug. */}
-                        {chain.kind === "quai"
-                          ? formatUnitsQuai(point.volume, chain.nativeCurrency.decimals)
-                          : formatUnitsEvm(point.volume, chain.nativeCurrency.decimals)}
+                        {formatTokenAmount(point.volume, chain.nativeCurrency.decimals, chain.kind)}
                       </span>
                     </div>
                   ))}
